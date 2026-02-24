@@ -7,10 +7,34 @@
 
 import { jwtVerify, SignJWT, JWTPayload as JoseJWTPayload } from 'jose';
 
+/**
+ * Shared role levels for all XferOps apps.
+ *
+ * This is a type contract only — no runtime permission logic lives here.
+ * Each app maintains its own role assignments in its own database and
+ * resolves the role for a given userId after validating the JWT.
+ *
+ * The auth service (xferops-auth) does NOT store or issue roles.
+ * JWTs carry identity only (sub, email) — never role claims.
+ */
+export enum AppRole {
+  ADMIN = 'ADMIN',
+  MANAGER = 'MANAGER',
+  MEMBER = 'MEMBER',
+  VIEWER = 'VIEWER',
+}
+
 export interface JWTPayload {
   userId: string;
   email: string;
+  /**
+   * @deprecated Roles are not included in XferOps JWTs as of v0.1.
+   * Each app resolves permissions from its own database using AppRole.
+   */
   role?: string;
+  /**
+   * @deprecated Name is not included in XferOps JWTs as of v0.1.
+   */
   name?: string;
   exp?: number;
   iat?: number;
