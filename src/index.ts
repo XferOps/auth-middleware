@@ -168,10 +168,13 @@ export function authMiddleware(secret: string) {
   };
 }
 
+// Re-export session utilities
+export * from './session.js';
+
 export default { 
   validateJWT, 
   createJWT, 
   createRefreshToken,
   extractToken,
-  authMiddleware 
+  authMiddleware,
 };

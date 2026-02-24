@@ -54,6 +54,7 @@ export declare function extractToken(authHeader: string | undefined): string | n
  * @returns Middleware function
  */
 export declare function authMiddleware(secret: string): (authHeader: string | undefined) => Promise<ValidationResult>;
+export * from './session.js';
 declare const _default: {
     validateJWT: typeof validateJWT;
     createJWT: typeof createJWT;
