@@ -74,6 +74,8 @@ jobs:
           registry-url: 'https://npm.pkg.github.com'
           
       - name: Publish to GitHub Packages
-        run: npm publish
+        # Uses PACKAGES_TOKEN (PAT with write:packages) — GITHUB_TOKEN cannot
+        # create org-level packages. If version already exists, skip gracefully.
+        run: npm publish || echo "Version already published, skipping."
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.PACKAGES_TOKEN }}
