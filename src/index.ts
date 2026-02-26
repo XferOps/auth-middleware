@@ -1,11 +1,34 @@
 /**
  * @xferops/auth-middleware
- * 
+ *
  * Shared JWT validation middleware for XferOps apps.
  * Validates tokens against the shared AUTH_SECRET.
+ *
+ * v0.1 architecture contract:
+ *   - All tokens are issued by auth.xferops.dev (JWT_ISSUER)
+ *   - All tokens carry audience "xferops" (JWT_AUDIENCE)
+ *   - JWTs carry identity only (sub, email) — never role or name claims
+ *   - Apps resolve permissions from their own databases using AppRole
  */
 
 import { jwtVerify, SignJWT, JWTPayload as JoseJWTPayload } from 'jose';
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+/**
+ * Issuer and audience for all XferOps JWTs.
+ * Must match the values set by xferops-auth (src/lib/tokens.ts).
+ */
+export const JWT_ISSUER  = 'auth.xferops.dev';
+export const JWT_AUDIENCE = 'xferops';
+
+/**
+ * Default access token TTL — 15 minutes.
+ * Short window limits damage from a stolen token.
+ */
+const DEFAULT_ACCESS_TTL = '15m';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 /**
  * Shared role levels for all XferOps apps.
@@ -14,28 +37,18 @@ import { jwtVerify, SignJWT, JWTPayload as JoseJWTPayload } from 'jose';
  * Each app maintains its own role assignments in its own database and
  * resolves the role for a given userId after validating the JWT.
  *
- * The auth service (xferops-auth) does NOT store or issue roles.
- * JWTs carry identity only (sub, email) — never role claims.
+ * The auth service (xferops-auth) does NOT store or issue roles in JWTs.
  */
 export enum AppRole {
-  ADMIN = 'ADMIN',
+  ADMIN   = 'ADMIN',
   MANAGER = 'MANAGER',
-  MEMBER = 'MEMBER',
-  VIEWER = 'VIEWER',
+  MEMBER  = 'MEMBER',
+  VIEWER  = 'VIEWER',
 }
 
 export interface JWTPayload {
   userId: string;
   email: string;
-  /**
-   * @deprecated Roles are not included in XferOps JWTs as of v0.1.
-   * Each app resolves permissions from its own database using AppRole.
-   */
-  role?: string;
-  /**
-   * @deprecated Name is not included in XferOps JWTs as of v0.1.
-   */
-  name?: string;
   exp?: number;
   iat?: number;
 }
@@ -47,147 +60,122 @@ export interface ValidationResult {
 }
 
 export interface CreateTokenOptions {
-  expiresIn?: string; // e.g., "1h", "7d", "30d"
+  expiresIn?: string; // e.g., "15m", "7d", "30d"
 }
 
-/**
- * Convert our payload to jose's format
- */
+// ─── Internal helpers ────────────────────────────────────────────────────────
+
 function toJosePayload(payload: JWTPayload): JoseJWTPayload {
+  // v0.1: JWTs carry identity only — sub + email.
+  // role and name are intentionally excluded; apps resolve them locally.
   return {
     sub: payload.userId,
     email: payload.email,
-    role: payload.role,
-    name: payload.name,
   };
 }
 
-/**
- * Convert jose payload to our format
- */
 function fromJosePayload(payload: JoseJWTPayload): JWTPayload {
   return {
     userId: payload.sub as string,
     email: payload.email as string,
-    role: payload.role as string | undefined,
-    name: payload.name as string | undefined,
     exp: payload.exp,
     iat: payload.iat,
   };
 }
 
+// ─── Public API ──────────────────────────────────────────────────────────────
+
 /**
- * Validate a JWT token
- * @param token - The JWT token string (without "Bearer " prefix)
- * @param secret - The shared AUTH_SECRET (base64 encoded)
- * @returns ValidationResult with payload if valid
+ * Validate a JWT token.
+ *
+ * Enforces iss=auth.xferops.dev and aud=xferops so tokens from other sources
+ * or with different audience claims are rejected even if the secret matches.
+ *
+ * @param token  - The JWT string (without "Bearer " prefix)
+ * @param secret - The shared AUTH_SECRET
  */
 export async function validateJWT(token: string, secret: string): Promise<ValidationResult> {
   try {
-    // Convert secret to Uint8Array
     const secretKey = new TextEncoder().encode(secret);
 
-    // Verify the token
     const { payload } = await jwtVerify(token, secretKey, {
       algorithms: ['HS256'],
+      issuer:     JWT_ISSUER,
+      audience:   JWT_AUDIENCE,
     });
-
-    // Convert jose payload to our format
-    const jwtPayload = fromJosePayload(payload);
 
     return {
       valid: true,
-      payload: jwtPayload,
+      payload: fromJosePayload(payload),
     };
   } catch (error) {
-    // Determine the error type
     if (error instanceof Error) {
       if (error.message.includes('JWT expired')) {
         return { valid: false, error: 'Token has expired' };
       }
-      if (error.message.includes('invalid')) {
-        return { valid: false, error: 'Invalid token' };
-      }
-      return { valid: false, error: error.message };
+      return { valid: false, error: 'Invalid token' };
     }
     return { valid: false, error: 'Unknown validation error' };
   }
 }
 
 /**
- * Create a JWT token
- * @param payload - The payload to encode
- * @param secret - The shared AUTH_SECRET
- * @param options - Options including expiration
- * @returns The JWT token string
+ * Create a signed JWT token.
+ *
+ * Sets iss=auth.xferops.dev and aud=xferops on every token.
+ * Default TTL is 15 minutes (access token standard).
+ *
+ * @param payload  - Identity payload (userId + email only — no roles)
+ * @param secret   - The shared AUTH_SECRET
+ * @param options  - Optional override for expiresIn
  */
 export async function createJWT(
-  payload: JWTPayload, 
-  secret: string, 
-  options: CreateTokenOptions = {}
+  payload: JWTPayload,
+  secret: string,
+  options: CreateTokenOptions = {},
 ): Promise<string> {
   const secretKey = new TextEncoder().encode(secret);
-  
-  const jwt = new SignJWT(toJosePayload(payload))
+
+  return new SignJWT(toJosePayload(payload))
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
-    .setSubject(payload.userId);
-
-  // Set expiration if provided
-  if (options.expiresIn) {
-    jwt.setExpirationTime(options.expiresIn);
-  } else {
-    // Default: 24 hours
-    jwt.setExpirationTime('24h');
-  }
-
-  return jwt.sign(secretKey);
+    .setSubject(payload.userId)
+    .setIssuer(JWT_ISSUER)
+    .setAudience(JWT_AUDIENCE)
+    .setExpirationTime(options.expiresIn ?? DEFAULT_ACCESS_TTL)
+    .sign(secretKey);
 }
 
 /**
- * Create a refresh token (longer expiration)
- * @param payload - The payload to encode
- * @param secret - The shared AUTH_SECRET
- * @returns The refresh token string (30 day expiration)
+ * Create a refresh token (30-day expiration).
  */
 export async function createRefreshToken(
-  payload: JWTPayload, 
-  secret: string
+  payload: JWTPayload,
+  secret: string,
 ): Promise<string> {
   return createJWT(payload, secret, { expiresIn: '30d' });
 }
 
 /**
- * Extract token from Authorization header
- * @param authHeader - The Authorization header value (e.g., "Bearer <token>")
- * @returns The token string, or null if not found
+ * Extract token from an Authorization header.
+ *
+ * @param authHeader - "Bearer <token>" string
+ * @returns The token string, or null if missing/malformed
  */
 export function extractToken(authHeader: string | undefined): string | null {
-  if (!authHeader) {
-    return null;
-  }
-  
+  if (!authHeader) return null;
   const parts = authHeader.split(' ');
-  if (parts.length !== 2 || parts[0] !== 'Bearer') {
-    return null;
-  }
-  
+  if (parts.length !== 2 || parts[0] !== 'Bearer') return null;
   return parts[1];
 }
 
 /**
- * Middleware factory for validating JWT in HTTP requests
- * @param secret - The shared AUTH_SECRET
- * @returns Middleware function
+ * Middleware factory for validating JWTs from Authorization headers.
  */
 export function authMiddleware(secret: string) {
   return async (authHeader: string | undefined): Promise<ValidationResult> => {
     const token = extractToken(authHeader);
-    
-    if (!token) {
-      return { valid: false, error: 'No token provided' };
-    }
-    
+    if (!token) return { valid: false, error: 'No token provided' };
     return validateJWT(token, secret);
   };
 }
@@ -195,9 +183,9 @@ export function authMiddleware(secret: string) {
 // Re-export session utilities
 export * from './session.js';
 
-export default { 
-  validateJWT, 
-  createJWT, 
+export default {
+  validateJWT,
+  createJWT,
   createRefreshToken,
   extractToken,
   authMiddleware,
