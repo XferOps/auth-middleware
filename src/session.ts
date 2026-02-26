@@ -1,6 +1,6 @@
 /**
  * @xferops/auth-middleware
- * 
+ *
  * Session cookie management for XferOps apps.
  */
 
@@ -14,15 +14,13 @@ export interface SessionConfig {
   secure?: boolean;
   sameSite?: 'lax' | 'strict' | 'none';
   httpOnly?: boolean;
-  maxAge?: number; // seconds
-  refreshThreshold?: number; // seconds before expiry to refresh
+  maxAge?: number;          // seconds
+  refreshThreshold?: number; // seconds before expiry to trigger refresh
 }
 
 export interface SessionData {
   userId: string;
   email: string;
-  role?: string;
-  name?: string;
 }
 
 export interface SessionResult {
@@ -32,31 +30,31 @@ export interface SessionResult {
   shouldRefresh?: boolean;
 }
 
+// ─── Session create / validate ───────────────────────────────────────────────
+
 /**
- * Create a session cookie value
+ * Create a session token (JWT) for the given identity.
  */
 export async function createSession(
   session: SessionData,
-  config: SessionConfig
+  config: SessionConfig,
 ): Promise<string> {
   const payload: JWTPayload = {
     userId: session.userId,
-    email: session.email,
-    role: session.role,
-    name: session.name,
+    email:  session.email,
   };
 
-  return createJWT(payload, config.secret, { 
-    expiresIn: config.maxAge ? `${config.maxAge}s` : '24h' 
+  return createJWT(payload, config.secret, {
+    expiresIn: config.maxAge ? `${config.maxAge}s` : undefined,
   });
 }
 
 /**
- * Validate and parse a session cookie
+ * Validate a session cookie value and return the session data.
  */
 export async function validateSession(
   cookieValue: string | undefined,
-  config: SessionConfig
+  config: SessionConfig,
 ): Promise<SessionResult> {
   if (!cookieValue) {
     return { valid: false, error: 'No session cookie' };
@@ -68,130 +66,116 @@ export async function validateSession(
     return { valid: false, error: result.error };
   }
 
-  // Check if token needs refresh (expiring soon)
   let shouldRefresh = false;
   if (config.refreshThreshold && result.payload.exp) {
     const now = Math.floor(Date.now() / 1000);
-    const timeUntilExpiry = result.payload.exp - now;
-    shouldRefresh = timeUntilExpiry < config.refreshThreshold;
+    shouldRefresh = result.payload.exp - now < config.refreshThreshold;
   }
 
   return {
     valid: true,
     session: {
       userId: result.payload.userId,
-      email: result.payload.email,
-      role: result.payload.role,
-      name: result.payload.name,
+      email:  result.payload.email,
     },
     shouldRefresh,
   };
 }
 
+// ─── Cookie helpers ──────────────────────────────────────────────────────────
+
 /**
- * Get cookie options for Set-Cookie header
+ * Build the attributes portion of a Set-Cookie header.
+ *
+ * HttpOnly and Secure use bare-flag format (RFC 6265 §5.2) — NOT `HttpOnly=true`.
+ * Using `HttpOnly=true` is incorrect per spec; many parsers treat it as an unknown
+ * attribute name and silently drop the security flag.
  */
 export function getCookieOptions(config: SessionConfig): string {
-  const options: string[] = [
-    `Path=${config.path || '/'}`,
-    `HttpOnly=${config.httpOnly !== false ? 'true' : 'false'}`,
-    `Secure=${config.secure !== false ? 'true' : 'false'}`,
-    `SameSite=${config.sameSite || 'lax'}`,
-  ];
+  const parts: string[] = [`Path=${config.path ?? '/'}`];
 
-  if (config.domain) {
-    options.push(`Domain=${config.domain}`);
-  }
+  if (config.secure !== false) parts.push('Secure');
+  if (config.httpOnly !== false) parts.push('HttpOnly');
 
-  if (config.maxAge) {
-    options.push(`Max-Age=${config.maxAge}`);
-  }
+  parts.push(`SameSite=${config.sameSite ?? 'lax'}`);
 
-  return options.join('; ');
+  if (config.domain)  parts.push(`Domain=${config.domain}`);
+  if (config.maxAge)  parts.push(`Max-Age=${config.maxAge}`);
+
+  return parts.join('; ');
 }
 
 /**
- * Create a Set-Cookie header value for session
- * Note: This is a sync version that returns a placeholder - use createSessionCookieString for actual use
- */
-export function createSessionCookie(
-  session: SessionData,
-  config: SessionConfig
-): string {
-  // Note: Use createSessionCookieString for actual token generation
-  // This sync version is a placeholder for API compatibility
-  return `${config.cookieName}=<token>; ${getCookieOptions(config)}`;
-}
-
-/**
- * Create a session cookie (async version)
+ * Create a full Set-Cookie header string (async — uses real token).
  */
 export async function createSessionCookieString(
   session: SessionData,
-  config: SessionConfig
+  config: SessionConfig,
 ): Promise<string> {
   const token = await createSession(session, config);
   return `${config.cookieName}=${token}; ${getCookieOptions(config)}`;
 }
 
 /**
- * Create a cleared session cookie (for logout)
+ * Create a Set-Cookie header that clears the session.
  */
 export function createLogoutCookie(config: SessionConfig): string {
   return `${config.cookieName}=; ${getCookieOptions(config)}; Max-Age=0`;
 }
 
+// ─── Removed: createSessionCookie (sync stub) ───────────────────────────────
+// The old sync createSessionCookie() returned a literal "<token>" placeholder —
+// callers who used it got a broken cookie that silently failed auth.
+// Use createSessionCookieString() (async) instead.
+
+// ─── Cookie parsing ──────────────────────────────────────────────────────────
+
 /**
- * Parse cookie header into key-value map
+ * Parse a Cookie request header into a key-value map.
  */
 export function parseCookieHeader(cookieHeader: string | undefined): Record<string, string> {
-  if (!cookieHeader) {
-    return {};
-  }
+  if (!cookieHeader) return {};
 
   const cookies: Record<string, string> = {};
-  
-  cookieHeader.split(';').forEach((cookie) => {
-    const [name, ...rest] = cookie.split('=');
-    if (name && rest.length > 0) {
-      cookies[name.trim()] = rest.join('=').trim();
-    }
+  cookieHeader.split(';').forEach((pair) => {
+    const [name, ...rest] = pair.split('=');
+    if (name) cookies[name.trim()] = rest.join('=').trim();
   });
-
   return cookies;
 }
 
 /**
- * Extract session from cookie header
+ * Extract and validate a session from a Cookie request header.
  */
 export function getSessionFromHeader(
   cookieHeader: string | undefined,
-  config: SessionConfig
+  config: SessionConfig,
 ): Promise<SessionResult> {
   const cookies = parseCookieHeader(cookieHeader);
-  const sessionCookie = cookies[config.cookieName];
-  return validateSession(sessionCookie, config);
+  return validateSession(cookies[config.cookieName], config);
 }
 
+// ─── Default config ──────────────────────────────────────────────────────────
+
 /**
- * Default config for XferOps apps
+ * Default session config for XferOps apps.
+ * Cookie name matches the access token issued by xferops-auth.
  */
 export const defaultSessionConfig: SessionConfig = {
-  cookieName: '__Secure-authjs.session-token',
-  secret: process.env.AUTH_SECRET || '',
-  path: '/',
-  secure: true,
-  sameSite: 'lax',
-  httpOnly: true,
-  maxAge: 60 * 60 * 24, // 24 hours
-  refreshThreshold: 60 * 15, // 15 minutes
+  cookieName:       '__Secure-xferops.access-token',
+  secret:           process.env.AUTH_SECRET ?? '',
+  path:             '/',
+  secure:           true,
+  sameSite:         'lax',
+  httpOnly:         true,
+  maxAge:           60 * 15,       // 15 minutes (access token TTL)
+  refreshThreshold: 60 * 5,        // refresh when <5 min remaining
 };
 
 export default {
   createSession,
   validateSession,
   getCookieOptions,
-  createSessionCookie,
   createSessionCookieString,
   createLogoutCookie,
   parseCookieHeader,
