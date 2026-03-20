@@ -1,4 +1,4 @@
-# @xferops/auth-middleware
+# @xferops/auth-middleware (DEPRECATED)
 
 Shared JWT validation middleware for XferOps apps.
 
